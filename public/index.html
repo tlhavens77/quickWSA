@@ -274,10 +274,14 @@
       <p>Comp average less repairs&nbsp;&middot;&nbsp;Asking + fee vs. threshold&nbsp;&middot;&nbsp;Buyer check&nbsp;&middot;&nbsp;Green / Red light</p>
     </div>
     <div class="header-actions">
+      <button class="btn btn-light" id="pdfUploadBtn" type="button">Upload PDF</button>
       <button class="btn btn-light" id="newDealBtn" type="button">New deal</button>
       <button class="btn btn-light" id="loadExampleBtn" type="button">Load example</button>
+      <input type="file" id="pdfUploadInput" accept="application/pdf,.pdf" hidden>
     </div>
   </div>
+
+  <div class="pdf-status" id="uploadStatus" role="status"></div>
 
   <div class="statusbar gray" id="statusBar" role="status" aria-live="polite">
     <b id="sbLight">ENTER COMPS</b><span id="sbDetail"></span>
@@ -1405,6 +1409,16 @@
     var J = window.jspdf.jsPDF;
     var doc = new J({ unit: "pt", format: "letter" });
     var FONT = registerPdfFonts(doc);
+    // Embed the full deal inside the PDF so it can be re-loaded later with Upload PDF.
+    try {
+      doc.setProperties({
+        title: "Wholesale Deal Report",
+        subject: asciiOnly(st.propAddress),
+        author: asciiOnly(st.analystName),
+        creator: "Wholesale Deal Analyzer",
+        keywords: encodeDeal(st)
+      });
+    } catch (e) {}
     var pageW = doc.internal.pageSize.getWidth();
     var pageH = doc.internal.pageSize.getHeight();
     var margin = 40, y = 0;
@@ -1677,6 +1691,74 @@
   }
 
   // ======================================================================
+  // PDF ROUND-TRIP: deal data rides inside the PDF, Upload PDF reads it back
+  // ======================================================================
+  var PDF_TAG = "WDA1:";
+  function asciiOnly(s){ return String(s || "").replace(/[^\x20-\x7E]/g, "").slice(0, 120); }
+  function encodeDeal(st){
+    var payload = JSON.stringify(st);
+    return PDF_TAG + btoa(unescape(encodeURIComponent(payload)));
+  }
+  function decodeDeal(b64){
+    try { return JSON.parse(decodeURIComponent(escape(atob(b64)))); } catch (e) { return null; }
+  }
+  function extractDealFromPdf(buf){
+    var bytes = new Uint8Array(buf), s = "", chunk = 32768;
+    for (var i = 0; i < bytes.length; i += chunk){
+      s += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
+    if (s.slice(0, 5) !== "%PDF-") return { error: "That file isn't a PDF." };
+    var m = /WDA1:([A-Za-z0-9+\/=]+)/.exec(s);
+    if (!m) return { error: "This PDF has no deal data inside. Only reports made with this version of the analyzer can be loaded (older reports didn't carry the data). Use Create PDF report on a deal, and reports from then on will load." };
+    var obj = decodeDeal(m[1]);
+    var st = sanitizeState(obj);
+    if (!st) return { error: "The deal data in this PDF couldn't be read. It may have been edited or damaged." };
+    return { state: st };
+  }
+  function sanitizeState(o){
+    if (!o || typeof o !== "object" || !Array.isArray(o.comps)) return null;
+    function S(v, max){ return (v === null || v === undefined) ? "" : String(v).slice(0, max || 200); }
+    var st = { settings: {}, comps: [] };
+    FIELD_IDS.forEach(function(id){ st[id] = S(o[id], id === "dealNotes" ? 5000 : 300); });
+    if (["avg", "median", "ppsf"].indexOf(st.arvMethod) < 0) st.arvMethod = "avg";
+    if (["", "light", "moderate", "heavy", "gut"].indexOf(st.rehabLevel) < 0) st.rehabLevel = "";
+    if (o.settings && typeof o.settings === "object"){
+      SETTING_IDS.forEach(function(id){ if (o.settings[id] !== undefined) st.settings[id] = S(o.settings[id], 20); });
+    }
+    o.comps.slice(0, MAX_COMP_ROWS).forEach(function(c){
+      c = c || {};
+      st.comps.push({ use: c.use !== false, address: S(c.address, 300), price: S(c.price, 20), sqft: S(c.sqft, 20),
+                      days: S(c.days, 20), dist: S(c.dist, 20), notes: S(c.notes, 300) });
+    });
+    return st;
+  }
+  function showUploadStatus(type, msg){
+    var box = $("uploadStatus");
+    box.className = "pdf-status show " + type;
+    box.textContent = msg;
+  }
+  function handlePdfUpload(file){
+    if (!file) return;
+    if (file.size > 20 * 1024 * 1024){ showUploadStatus("error", "That file is too large to be one of these reports."); return; }
+    var reader = new FileReader();
+    reader.onerror = function(){ showUploadStatus("error", "The file couldn't be read. Try again."); };
+    reader.onload = function(){
+      var res = extractDealFromPdf(reader.result);
+      if (res.error){ showUploadStatus("error", res.error); return; }
+      var st = res.state;
+      st.analystDate = todayStr();      // a re-analysis is dated today
+      applyState(st);
+      currentDealId = null;
+      clearStatus();
+      render();
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      showUploadStatus("success", "Loaded " + (st.propAddress || "the deal") + " from " + file.name +
+        ". The date is set to today. Change any value and the light updates as you go.");
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
+  // ======================================================================
   // EXAMPLE
   // ======================================================================
   function loadExample(){
@@ -1695,6 +1777,7 @@
     };
     applyState(ex);
     currentDealId = null;
+    $("uploadStatus").className = "pdf-status";
     render();
   }
 
@@ -1714,8 +1797,14 @@
   });
   $("downloadPdfBtn").addEventListener("click", createPdf);
   $("loadExampleBtn").addEventListener("click", loadExample);
+  $("pdfUploadBtn").addEventListener("click", function(){ $("pdfUploadInput").click(); });
+  $("pdfUploadInput").addEventListener("change", function(e){
+    var f = e.target.files && e.target.files[0];
+    handlePdfUpload(f);
+    e.target.value = "";               // lets the same file be chosen again
+  });
   armConfirm($("newDealBtn"), "Clear this deal?", function(){
-    applyState(newDealState()); currentDealId = null; clearStatus(); render();
+    applyState(newDealState()); currentDealId = null; clearStatus(); $("uploadStatus").className = "pdf-status"; render();
   });
   $("addCompBtn").addEventListener("click", function(){
     if (compBody.children.length < MAX_COMP_ROWS){ addCompRow({}); render(); }
@@ -1777,7 +1866,7 @@
   });
 
   // test hook (harmless in production)
-  window.__wda = { rehabInfo: rehabInfo, analyze: analyze, toInput: toInput, toCfg: toCfg, readState: readState, applyState: applyState, buildCsv: buildCsv };
+  window.__wda = { extractDealFromPdf: extractDealFromPdf, encodeDeal: encodeDeal, rehabInfo: rehabInfo, analyze: analyze, toInput: toInput, toCfg: toCfg, readState: readState, applyState: applyState, buildCsv: buildCsv };
 })();
 </script>
 </body>

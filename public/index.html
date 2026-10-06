@@ -51,7 +51,8 @@
   }
   .wda-header h1{margin:0 0 4px;font-size:1.5rem;letter-spacing:.02em;}
   .wda-header p{margin:0;color:#c9d6e8;font-size:.92rem;}
-  .header-actions{display:flex;gap:8px;flex-wrap:wrap;}
+  .wda-header > div:first-child{flex:1 1 300px;min-width:0;}
+  .header-actions{display:flex;gap:8px;flex-wrap:wrap;flex:0 1 auto;}
 
   /* sticky status bar */
   .statusbar{
@@ -79,6 +80,8 @@
     gap:8px;flex-wrap:wrap;
   }
   .wda-card-head small{font-weight:400;color:#c9d6e8;font-size:.78rem;}
+  .wda-card-head > span{flex:1 1 260px;min-width:0;}
+  .wda-card-head .btn-light{flex:0 0 auto;}
   .wda-card-body{padding:16px;}
   details.wda-card > summary{cursor:pointer;list-style:none;}
   details.wda-card > summary::-webkit-details-marker{display:none;}
@@ -274,7 +277,7 @@
       <p>Comp average less repairs&nbsp;&middot;&nbsp;Asking + fee vs. threshold&nbsp;&middot;&nbsp;Buyer check&nbsp;&middot;&nbsp;Green / Red light</p>
     </div>
     <div class="header-actions">
-      <button class="btn btn-light" id="pdfUploadBtn" type="button">Upload PDF</button>
+      <button class="btn btn-light" id="pdfUploadBtn" type="button" title="Reload a PDF report made by this analyzer">Previous Analysis PDF Upload</button>
       <button class="btn btn-light" id="newDealBtn" type="button">New deal</button>
       <button class="btn btn-light" id="loadExampleBtn" type="button">Load example</button>
       <input type="file" id="pdfUploadInput" accept="application/pdf,.pdf" hidden>
@@ -370,7 +373,7 @@
 
   <!-- 2. COMPARABLES -->
   <div class="wda-card">
-    <div class="wda-card-head">2&nbsp;&nbsp;COMPARABLES <small>3 to 5 sold comps. Untick Use to leave one out. Blank rows are ignored.</small></div>
+    <div class="wda-card-head"><span>2&nbsp;&nbsp;COMPARABLES <small>3 to 5 sold comps. Untick Use to leave one out. Blank rows are ignored.</small></span><button class="btn btn-light" id="compPdfBtn" type="button" title="Fill the subject details and comps from a comp analysis PDF">Comp Analysis PDF Upload</button></div>
     <div class="wda-card-body">
       <div class="comp-table-wrap">
         <table class="comp-table">
@@ -1702,18 +1705,338 @@
   function decodeDeal(b64){
     try { return JSON.parse(decodeURIComponent(escape(atob(b64)))); } catch (e) { return null; }
   }
-  function extractDealFromPdf(buf){
+  function pdfBinaryString(buf){
     var bytes = new Uint8Array(buf), s = "", chunk = 32768;
     for (var i = 0; i < bytes.length; i += chunk){
       s += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
     }
+    return s;
+  }
+  // Order of attempts: (1) a saved deal report from this analyzer, (2) a comp report that carries its
+  // data inside, (3) a comp report read from its visible text (the Comp Report Builder as built today).
+  async function extractFromPdf(buf){
+    var s = pdfBinaryString(buf);
     if (s.slice(0, 5) !== "%PDF-") return { error: "That file isn't a PDF." };
     var m = /WDA1:([A-Za-z0-9+\/=]+)/.exec(s);
-    if (!m) return { error: "This PDF has no deal data inside. Only reports made with this version of the analyzer can be loaded (older reports didn't carry the data). Use Create PDF report on a deal, and reports from then on will load." };
-    var obj = decodeDeal(m[1]);
-    var st = sanitizeState(obj);
-    if (!st) return { error: "The deal data in this PDF couldn't be read. It may have been edited or damaged." };
-    return { state: st };
+    if (m){
+      var st = sanitizeState(decodeDeal(m[1]));
+      if (!st) return { error: "The deal data in this PDF couldn't be read. It may have been edited or damaged." };
+      return { kind: "deal", state: st };
+    }
+    var m2 = /WCA1:([A-Za-z0-9+\/=]+)/.exec(s);
+    if (m2){
+      var obj = decodeDeal(m2[1]);
+      var r1 = obj ? normalizeCompReport(obj.subject, obj.comps, "embedded") : null;
+      if (r1 && r1.comps.length) return r1;
+    }
+    var r2 = await readCompReportText(s);
+    if (r2) return r2;
+    return { error: "This PDF isn't a saved deal report or a comp report I recognize, so there is nothing to load. Reports made by the Comp Report Builder and by this analyzer's Create PDF report both work." };
+  }
+
+  // ---------- comp report: shared normalizing ----------
+  function cleanNum(v){
+    if (v === null || v === undefined) return null;
+    var n = parseFloat(String(v).replace(/[^0-9.\-]/g, ""));
+    return isFinite(n) ? n : null;
+  }
+  function daysSince(dateStr){
+    var m = /(\d{4})-(\d{2})-(\d{2})/.exec(String(dateStr || ""));
+    if (!m) return null;
+    var d = new Date(+m[1], +m[2] - 1, +m[3]), now = new Date();
+    var d0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    var days = Math.round((d0 - d) / 86400000);
+    return isFinite(days) ? Math.max(0, days) : null;
+  }
+  function str(v, max){ return (v === null || v === undefined) ? "" : String(v).replace(/\s+/g, " ").trim().slice(0, max || 200); }
+  function compNote(c){
+    var bits = [];
+    if (c.soldDate) bits.push("Sold " + c.soldDate);
+    if (c.beds || c.baths) bits.push((c.beds || "?") + "/" + (c.baths || "?"));
+    if (c.garage) bits.push(/^(yes|true)$/i.test(c.garage) ? "garage" : /^no/i.test(c.garage) ? "no garage" : c.garage.toLowerCase() + " garage");
+    return bits.join(" · ");
+  }
+  // subject / comps arrive either from the embedded JSON (raw app objects) or from the text reader (strings)
+  function normalizeCompReport(subj, comps, source){
+    subj = subj || {};
+    if (!Array.isArray(comps)) return null;
+    var S = {
+      address: str(subj.address, 300), sqft: cleanNum(subj.sqft), ask: cleanNum(subj.ask),
+      beds: str(subj.beds, 10), baths: str(subj.baths, 10), roof: str(subj.roofType || subj.roof, 60),
+      foundation: str(subj.foundation, 40), foundationSqft: cleanNum(subj.foundationSqft),
+      garage: subj.garage === true ? (str(subj.garageType, 30) || "Yes") : subj.garage === false ? "No garage" : str(subj.garage, 40)
+    };
+    var out = [], skipped = 0;
+    comps.forEach(function(c){
+      c = c || {};
+      var price = cleanNum(c.soldPrice !== undefined ? c.soldPrice : c.price);
+      if (!(price > 0)){ skipped++; return; }
+      var date = str(c.soldDate, 30).slice(0, 10);
+      var garage = c.garage === true ? (str(c.garageType, 30) || "Yes") : c.garage === false ? "No" : str(c.garage, 30);
+      var rec = { address: str(c.address, 300), price: price, sqft: cleanNum(c.sqft), days: daysSince(date),
+                  dist: cleanNum(c.miles !== undefined ? c.miles : c.dist),
+                  soldDate: /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : "", beds: str(c.beds, 10), baths: str(c.baths, 10), garage: garage };
+      out.push(rec);
+    });
+    out.forEach(function(c){ c.notes = compNote(c); });
+    return { kind: "comps", subject: S, comps: out, skipped: skipped, source: source };
+  }
+
+  // ---------- comp report: read the visible text ----------
+  var WIN_ANSI = { 0x80: "€", 0x85: "…", 0x91: "'", 0x92: "'", 0x93: '"', 0x94: '"', 0x95: "•", 0x96: "–", 0x97: "—" };
+  function pdfStringOut(raw){
+    var o = "";
+    for (var i = 0; i < raw.length; i++){
+      var ch = raw.charAt(i);
+      if (ch !== "\\"){ o += ch; continue; }
+      var nx = raw.charAt(++i);
+      if (nx === "n") o += "\n"; else if (nx === "r") o += "\r"; else if (nx === "t") o += "\t";
+      else if (nx === "b" || nx === "f") o += " ";
+      else if (/[0-7]/.test(nx)){
+        var oct = nx;
+        while (oct.length < 3 && /[0-7]/.test(raw.charAt(i + 1))) oct += raw.charAt(++i);
+        var code = parseInt(oct, 8) & 255;
+        o += WIN_ANSI[code] || String.fromCharCode(code);
+      } else if (nx === "\r" || nx === "\n"){ if (nx === "\r" && raw.charAt(i + 1) === "\n") i++; }
+      else o += nx;
+    }
+    return o;
+  }
+  function tokenizePdf(src){
+    var toks = [], i = 0, n = src.length, WS = " \t\r\n\f\0", DL = "()<>[]{}/%";
+    while (i < n){
+      var c = src.charAt(i);
+      if (WS.indexOf(c) >= 0){ i++; continue; }
+      if (c === "%"){ while (i < n && src.charAt(i) !== "\n" && src.charAt(i) !== "\r") i++; continue; }
+      if (c === "("){
+        var depth = 1, j = i + 1, buf = "";
+        while (j < n && depth > 0){
+          var d = src.charAt(j);
+          if (d === "\\"){ buf += d + src.charAt(j + 1); j += 2; continue; }
+          if (d === "(") depth++; else if (d === ")"){ depth--; if (!depth) break; }
+          buf += d; j++;
+        }
+        toks.push({ s: pdfStringOut(buf) }); i = j + 1; continue;
+      }
+      if (c === "<"){
+        if (src.charAt(i + 1) === "<"){ toks.push({ op: "<<" }); i += 2; continue; }
+        var k = src.indexOf(">", i), hex = src.slice(i + 1, k < 0 ? n : k).replace(/\s+/g, "");
+        var hs = ""; for (var h = 0; h + 1 < hex.length; h += 2) hs += String.fromCharCode(parseInt(hex.substr(h, 2), 16) || 32);
+        toks.push({ s: hs }); i = (k < 0 ? n : k) + 1; continue;
+      }
+      if (c === ">"){ toks.push({ op: ">>" }); i += (src.charAt(i + 1) === ">") ? 2 : 1; continue; }
+      if (c === "[" || c === "]"){ toks.push({ op: c }); i++; continue; }
+      if (c === "/"){ var q = i + 1; while (q < n && WS.indexOf(src.charAt(q)) < 0 && DL.indexOf(src.charAt(q)) < 0) q++; toks.push({ nm: src.slice(i + 1, q) }); i = q; continue; }
+      var r = i; while (r < n && WS.indexOf(src.charAt(r)) < 0 && DL.indexOf(src.charAt(r)) < 0) r++;
+      if (r === i){ i++; continue; }
+      var w = src.slice(i, r);
+      toks.push(/^[+\-]?(\d+\.?\d*|\.\d+)$/.test(w) ? { n: parseFloat(w) } : { op: w });
+      i = r;
+    }
+    return toks;
+  }
+  function textItems(src){
+    var toks = tokenizePdf(src), st = [], items = [], arr = null;
+    var lx = 0, ly = 0, tl = 0, size = 10, moved = true;
+    function num(t){ return t && t.n !== undefined ? t.n : 0; }
+    function emit(text){
+      if (!text) return;
+      var last = items[items.length - 1];
+      if (!moved && last && Math.abs(last.y - ly) < 0.01 && last.x === lastX){ last.t += text; return; }
+      items.push({ x: lx, y: ly, t: text, size: size }); lastX = lx; moved = false;
+    }
+    var lastX = null;
+    toks.forEach(function(t){
+      if (t.op === "["){ arr = []; return; }
+      if (t.op === "]"){ st.push({ arr: arr || [] }); arr = null; return; }
+      if (t.op === undefined || t.op === "<<" || t.op === ">>"){
+        if (arr) arr.push(t); else st.push(t);
+        return;
+      }
+      var a = st, L = a.length;
+      switch (t.op){
+        case "BT": lx = 0; ly = 0; moved = true; break;
+        case "Tf": size = num(a[L - 1]) || size; break;
+        case "TL": tl = num(a[L - 1]); break;
+        case "Td": lx += num(a[L - 2]); ly += num(a[L - 1]); moved = true; break;
+        case "TD": tl = -num(a[L - 1]); lx += num(a[L - 2]); ly += num(a[L - 1]); moved = true; break;
+        case "Tm": lx = num(a[L - 2]); ly = num(a[L - 1]); moved = true; break;
+        case "T*": ly -= tl; moved = true; break;
+        case "Tj": if (a[L - 1] && a[L - 1].s !== undefined) emit(a[L - 1].s); break;
+        case "TJ":
+          if (a[L - 1] && a[L - 1].arr){
+            var txt = ""; a[L - 1].arr.forEach(function(p){ if (p.s !== undefined) txt += p.s; else if (p.n < -250) txt += " "; });
+            emit(txt);
+          }
+          break;
+        case "'": ly -= tl; moved = true; if (a[L - 1] && a[L - 1].s !== undefined) emit(a[L - 1].s); break;
+        case '"': ly -= tl; moved = true; if (a[L - 1] && a[L - 1].s !== undefined) emit(a[L - 1].s); break;
+      }
+      st = [];
+    });
+    return items;
+  }
+  async function inflateBytes(bytes){
+    var ds = new DecompressionStream("deflate");
+    var w = ds.writable.getWriter();
+    w.write(bytes).catch(function(){}); w.close().catch(function(){});     // errors surface from the reader below
+    var out = [], rd = ds.readable.getReader();
+    for (;;){ var x = await rd.read(); if (x.done) break; out.push(x.value); }
+    var total = 0; out.forEach(function(c){ total += c.length; });
+    var all = new Uint8Array(total), off = 0; out.forEach(function(c){ all.set(c, off); off += c.length; });
+    return pdfBinaryString(all);
+  }
+  async function contentStreams(s){
+    var res = [], pos = 0;
+    for (;;){
+      var k = s.indexOf("stream", pos);
+      if (k < 0) break;
+      pos = k + 6;
+      if (s.slice(k - 3, k) === "end") continue;
+      var start = k + 6;
+      if (s.charAt(start) === "\r") start++;
+      if (s.charAt(start) === "\n") start++;
+      var endIdx = s.indexOf("endstream", start);
+      if (endIdx < 0) break;
+      var dictStart = s.lastIndexOf("obj", k), dict = s.slice(dictStart < 0 ? 0 : dictStart, k);
+      var data = s.slice(start, endIdx);
+      var lm = /\/Length\s+(\d+)(?!\s+\d+\s+R)/.exec(dict);
+      if (lm && +lm[1] <= data.length) data = data.slice(0, +lm[1]); else data = data.replace(/\r?\n$/, "");
+      pos = endIdx + 9;
+      if (/\/FlateDecode/.test(dict)){
+        if (typeof DecompressionStream !== "function") continue;
+        try {
+          var bytes = new Uint8Array(data.length);
+          for (var i = 0; i < data.length; i++) bytes[i] = data.charCodeAt(i) & 255;
+          data = await inflateBytes(bytes);
+        } catch (e) { continue; }
+      }
+      if (/\bBT\b/.test(data) && /\bET\b/.test(data)) res.push(data);
+    }
+    return res;
+  }
+  function readingOrder(pages){
+    var all = [];
+    pages.forEach(function(items, pi){ items.forEach(function(it){ it.p = pi; all.push(it); }); });
+    all.sort(function(a, b){ return a.p - b.p || (Math.abs(a.y - b.y) > 1.5 ? b.y - a.y : a.x - b.x); });
+    return all;
+  }
+  function toLines(items){
+    var lines = [];
+    items.forEach(function(it){
+      var ln = lines.length ? lines[lines.length - 1] : null;
+      if (ln && ln.p === it.p && Math.abs(ln.y - it.y) <= 1.5) ln.items.push(it);
+      else lines.push({ p: it.p, y: it.y, items: [it] });
+    });
+    lines.forEach(function(l){ l.items.sort(function(a, b){ return a.x - b.x; }); });
+    return lines;
+  }
+  async function readCompReportText(s){
+    var streams = await contentStreams(s);
+    if (!streams.length) return null;
+    var all = readingOrder(streams.map(textItems));
+    function idxOf(t){ for (var i = 0; i < all.length; i++) if (all[i].t.trim() === t) return i; return -1; }
+    var iTitle = idxOf("Comparable Sales Report"), iSubj = idxOf("Subject Property"), iComps = idxOf("Sold Comparables");
+    if (iTitle < 0 && iComps < 0) return null;
+    // --- subject block
+    var subj = {};
+    if (iSubj >= 0){
+      var subjItems = all.slice(iSubj + 1, iComps > iSubj ? iComps : all.length);
+      var lines = toLines(subjItems), labelX = Math.min.apply(null, subjItems.map(function(i){ return i.x; }).concat([1e9]));
+      var lastKey = null;
+      lines.forEach(function(l){
+        var first = l.items[0], isLabel = first.x < labelX + 25 && l.items.length > 1;
+        if (!isLabel){ if (lastKey) subj[lastKey] += " " + l.items.map(function(i){ return i.t; }).join(" "); return; }
+        var lab = first.t.trim().toLowerCase(), val = l.items.slice(1).map(function(i){ return i.t; }).join(" ").trim();
+        var key = /^address/.test(lab) ? "address" : /^sq/.test(lab) ? "sqft" : /^bed/.test(lab) ? "bedbath" : /^roof/.test(lab) ? "roofType"
+          : /^basement|^crawl|^found/.test(lab) ? "foundationText" : /^garage/.test(lab) ? "garage" : /^ask/.test(lab) ? "ask" : null;
+        if (key){ subj[key] = val; lastKey = key; } else lastKey = null;
+      });
+      var bb = /([\d.]+|—|-)\s*\/\s*([\d.]+|—|-)/.exec(subj.bedbath || "");
+      if (bb){ subj.beds = /\d/.test(bb[1]) ? bb[1] : ""; subj.baths = /\d/.test(bb[2]) ? bb[2] : ""; }
+      var ft = subj.foundationText || "";
+      if (/\d/.test(ft) || /[A-Za-z]/.test(ft)){
+        subj.foundation = ft.replace(/\(.*$/, "").trim();
+        var fs = /\(([\d,]+)\s*sq/i.exec(ft); if (fs) subj.foundationSqft = fs[1];
+      }
+      if (!/[A-Za-z0-9]/.test(subj.roofType || "")) subj.roofType = "";
+      if (!/[A-Za-z]/.test(subj.garage || "")) subj.garage = "";
+      if (!/\d/.test(subj.ask || "")) subj.ask = ""; if (!/\d/.test(subj.sqft || "")) subj.sqft = "";
+    }
+    // --- comps table
+    if (iComps < 0) return { error: "This looks like a comp report but its comps table couldn't be found." };
+    var iEnd = -1; for (var e = iComps + 1; e < all.length; e++){ if (all[e].t.trim() === "Comparison"){ iEnd = e; break; } }
+    var tbl = all.slice(iComps + 1, iEnd < 0 ? all.length : iEnd), tlines = toLines(tbl);
+    var hdr = null; for (var h = 0; h < tlines.length; h++){
+      var txts = tlines[h].items.map(function(i){ return i.t.trim(); });
+      if (txts.indexOf("Sold date") >= 0 && txts.indexOf("Sold price") >= 0){ hdr = tlines[h]; break; }
+    }
+    if (!hdr) return { error: "This looks like a comp report but its comps table couldn't be read." };
+    var cols = hdr.items.map(function(i){ return { name: i.t.trim(), x: i.x }; });
+    function colFor(x){ var c = 0; for (var k = 0; k < cols.length; k++) if (cols[k].x <= x + 3) c = k; return c; }
+    var rows = [], cur = null;
+    tlines.forEach(function(l){
+      if (l === hdr) return;
+      var tx = l.items.map(function(i){ return i.t.trim(); });
+      if (tx.indexOf("Sold date") >= 0 && tx.indexOf("Sold price") >= 0) return;      // repeated header on a later page
+      l.items.forEach(function(it){
+        var ci = colFor(it.x);
+        if (ci === 0 && /^\d{1,2}$/.test(it.t.trim())){ cur = {}; rows.push(cur); return; }
+        if (!cur) return;
+        var nm = cols[ci].name; cur[nm] = (cur[nm] ? cur[nm] + " " : "") + it.t.trim();
+      });
+    });
+    var comps = rows.map(function(r){
+      var bd = /([\d.]+|—|-)\s*\/\s*([\d.]+|—|-)/.exec(r["Bd/Ba"] || "");
+      return { address: r["Address"] || "", soldDate: r["Sold date"] || "", sqft: r["Sq ft"], garage: r["Garage"] || "",
+               beds: bd && /\d/.test(bd[1]) ? bd[1] : "", baths: bd && /\d/.test(bd[2]) ? bd[2] : "",
+               miles: (/([\d.]+)\s*mi/.exec(r["Dist."] || "") || [])[1], soldPrice: /\d/.test(r["Sold price"] || "") ? r["Sold price"] : null };
+    });
+    var res = normalizeCompReport({ address: subj.address, sqft: subj.sqft, ask: subj.ask, beds: subj.beds, baths: subj.baths,
+      roofType: subj.roofType, foundation: subj.foundation, foundationSqft: subj.foundationSqft, garage: subj.garage }, comps, "text");
+    if (!res.comps.length) return { error: "This looks like a comp report, but I couldn't read any sold prices from its table. Fix or enter the comps by hand, or ask for the report to be re-created." };
+    return res;
+  }
+
+  function subjectNote(S){
+    var bits = [];
+    if (S.beds || S.baths) bits.push((S.beds || "?") + " bd / " + (S.baths || "?") + " ba");
+    if (S.roof) bits.push("roof " + S.roof.toLowerCase());
+    if (S.foundation) bits.push(S.foundation.toLowerCase() + (S.foundationSqft ? " " + fmt0(S.foundationSqft) + " sq ft" : ""));
+    if (S.garage) bits.push(/^no/i.test(S.garage) ? "no garage" : S.garage.toLowerCase() === "yes" ? "garage" : S.garage.toLowerCase() + " garage");
+    return bits.length ? "Comp report subject: " + bits.join(", ") : "";
+  }
+  function applyCompImport(res, fileName){
+    var st = readState(), priorAddr = (st.propAddress || "").trim().toLowerCase(), priorRepairs = st.repairs, hadComps = st.comps.some(function(c){ return num(c.price) > 0; });
+    var S = res.subject, changed = [];
+    if (S.address){ st.propAddress = S.address; changed.push("address"); }
+    if (S.sqft > 0){ st.subjSqft = String(S.sqft); changed.push(fmt0(S.sqft) + " sq ft"); }
+    if (S.ask > 0){ st.askingPrice = String(S.ask); changed.push("asking " + money(S.ask)); }
+    var used = res.comps.slice(0, MAX_COMP_ROWS);
+    st.comps = used.map(function(c){
+      return { use: true, address: c.address, price: String(c.price), sqft: c.sqft > 0 ? String(c.sqft) : "",
+               days: c.days === null ? "" : String(c.days), dist: c.dist === null ? "" : String(c.dist), notes: c.notes };
+    });
+    var note = subjectNote(S);
+    if (note){
+      var kept = (st.dealNotes || "").split("\n").filter(function(l){ return l.indexOf("Comp report subject:") !== 0; }).join("\n").trim();
+      st.dealNotes = kept ? kept + "\n" + note : note;
+    }
+    applyState(st);
+    if ($("rehabLevel").value) syncRehab();
+    var repairsMoved = $("repairs").value !== priorRepairs;
+    if (S.address && priorAddr && S.address.trim().toLowerCase() !== priorAddr) currentDealId = null;   // a different property: don't overwrite the loaded saved deal on update
+    clearStatus();
+    render();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    var msg = "Loaded " + used.length + " comp" + (used.length === 1 ? "" : "s") + (changed.length ? " and the subject details (" + changed.join(", ") + ")" : "") + " from " + fileName + ". " +
+      (hadComps ? "The comps you had entered were replaced. " : "") +
+      "Your fee, threshold, repairs method and settings were left as they were." +
+      (repairsMoved ? " Repairs updated to " + money(num($("repairs").value)) + " because the rehab level is tied to sq ft." : "");
+    if (res.comps.length > used.length) msg += " Only the first " + used.length + " of " + res.comps.length + " comps fit.";
+    if (res.skipped) msg += " " + res.skipped + " row" + (res.skipped === 1 ? " had" : "s had") + " no sold price and " + (res.skipped === 1 ? "was" : "were") + " skipped.";
+    if (res.source === "text") msg += " Read from the report's text, so spot-check the rows against the PDF.";
+    showUploadStatus("success", msg);
   }
   function sanitizeState(o){
     if (!o || typeof o !== "object" || !Array.isArray(o.comps)) return null;
@@ -1743,17 +2066,21 @@
     var reader = new FileReader();
     reader.onerror = function(){ showUploadStatus("error", "The file couldn't be read. Try again."); };
     reader.onload = function(){
-      var res = extractDealFromPdf(reader.result);
-      if (res.error){ showUploadStatus("error", res.error); return; }
-      var st = res.state;
-      st.analystDate = todayStr();      // a re-analysis is dated today
-      applyState(st);
-      currentDealId = null;
-      clearStatus();
-      render();
-      window.scrollTo({ top: 0, behavior: "smooth" });
-      showUploadStatus("success", "Loaded " + (st.propAddress || "the deal") + " from " + file.name +
-        ". The date is set to today. Change any value and the light updates as you go.");
+      extractFromPdf(reader.result).then(function(res){
+        if (res.error){ showUploadStatus("error", res.error); return; }
+        if (res.kind === "comps"){ applyCompImport(res, file.name); return; }
+        var st = res.state;
+        st.analystDate = todayStr();      // a re-analysis is dated today
+        applyState(st);
+        currentDealId = null;
+        clearStatus();
+        render();
+        window.scrollTo({ top: 0, behavior: "smooth" });
+        showUploadStatus("success", "Loaded " + (st.propAddress || "the deal") + " from " + file.name +
+          ". The date is set to today. Change any value and the light updates as you go.");
+      }).catch(function(err){
+        showUploadStatus("error", "That PDF couldn't be read (" + (err && err.message ? err.message : "unknown error") + ").");
+      });
     };
     reader.readAsArrayBuffer(file);
   }
@@ -1798,6 +2125,7 @@
   $("downloadPdfBtn").addEventListener("click", createPdf);
   $("loadExampleBtn").addEventListener("click", loadExample);
   $("pdfUploadBtn").addEventListener("click", function(){ $("pdfUploadInput").click(); });
+  $("compPdfBtn").addEventListener("click", function(){ $("pdfUploadInput").click(); });
   $("pdfUploadInput").addEventListener("change", function(e){
     var f = e.target.files && e.target.files[0];
     handlePdfUpload(f);
@@ -1866,7 +2194,7 @@
   });
 
   // test hook (harmless in production)
-  window.__wda = { extractDealFromPdf: extractDealFromPdf, encodeDeal: encodeDeal, rehabInfo: rehabInfo, analyze: analyze, toInput: toInput, toCfg: toCfg, readState: readState, applyState: applyState, buildCsv: buildCsv };
+  window.__wda = { extractFromPdf: extractFromPdf, encodeDeal: encodeDeal, rehabInfo: rehabInfo, analyze: analyze, toInput: toInput, toCfg: toCfg, readState: readState, applyState: applyState, buildCsv: buildCsv };
 })();
 </script>
 </body>

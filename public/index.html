@@ -128,7 +128,7 @@
 
   /* comps table */
   .comp-table-wrap{overflow-x:auto;}
-  table.comp-table{width:100%;border-collapse:collapse;min-width:820px;}
+  table.comp-table{width:100%;border-collapse:collapse;min-width:860px;}
   table.comp-table th{
     text-align:left;font-size:.74rem;text-transform:uppercase;letter-spacing:.03em;
     color:var(--muted);padding:6px 6px;border-bottom:2px solid var(--line);
@@ -314,6 +314,11 @@
           <label for="analystDate">Date</label>
           <input type="text" id="analystDate" placeholder="MM/DD/YYYY">
         </div>
+        <div class="wda-field">
+          <label for="subjDom">Days on market</label>
+          <input type="number" id="subjDom" min="0" step="1" inputmode="numeric" placeholder="e.g. 45">
+          <span class="hint">how long the subject has been listed</span>
+        </div>
       </div>
     </div>
   </div>
@@ -323,7 +328,7 @@
     <div class="wda-card-head">1&nbsp;&nbsp;DEAL INPUTS</div>
     <div class="wda-card-body">
       <p class="wda-legend"><span class="swatch"></span>Yellow cells with blue text are inputs. Change these for each deal.</p>
-      <p class="formula"><b>The test:</b> GREEN when asking price + fee is at or under threshold % &times; (comp average &minus; repairs).</p>
+      <p class="formula"><b>The test:</b> GREEN when asking price + fee is at or under threshold % &times; (comp average &minus; repairs). With no comps, the replacement cost value stands in for the comp average.</p>
       <div class="wda-field-row">
         <div class="wda-field">
           <label for="askingPrice">Asking price</label>
@@ -353,8 +358,9 @@
             <option value="avg">Comp average (default)</option>
             <option value="median">Comp median</option>
             <option value="ppsf">$/sq ft &times; subject sq ft</option>
+            <option value="repl">Replacement cost value</option>
           </select>
-          <span class="hint">the three estimates are compared in section 2</span>
+          <span class="hint">the estimates are compared in section 2</span>
         </div>
         <div class="wda-field">
           <label for="rehabLevel">Rehab level (fills repairs)</label>
@@ -366,6 +372,11 @@
             <option value="gut">Full gut</option>
           </select>
           <span class="hint" id="rehabHint">Pick a level to fill repairs from sq ft</span>
+        </div>
+        <div class="wda-field">
+          <label for="replCost">Replacement cost value</label>
+          <div class="prefix-wrap"><span>$</span><input type="number" id="replCost" min="0" step="1000" inputmode="numeric" placeholder="from the comp report"></div>
+          <span class="hint">stands in for the comp average when there are no comps</span>
         </div>
       </div>
     </div>
@@ -386,7 +397,8 @@
               <th style="width:78px;">$ / sq ft</th>
               <th style="width:70px;">Days ago</th>
               <th style="width:70px;">Miles</th>
-              <th style="min-width:150px;">Notes</th>
+              <th style="width:62px;" title="Days on market before it sold">DOM</th>
+              <th style="min-width:130px;">Notes</th>
             </tr>
           </thead>
           <tbody id="compTableBody"></tbody>
@@ -542,7 +554,7 @@
     </div>
   </details>
 
-  <p class="wda-disclaimer"><b>Not an appraisal.</b> This tool is a screening model. Comp quality (distance, condition, recency, concessions) can move the comp average more than the math. Repairs are subtracted from the comp average before the threshold test, and the buyer check treats the comp average as the buyer's resale value (ARV), using the cost and profit percentages in Settings. Always verify numbers independently before making an offer.</p>
+  <p class="wda-disclaimer"><b>Not an appraisal.</b> This tool is a screening model. Comp quality (distance, condition, recency, concessions) can move the comp average more than the math. Repairs are subtracted from the comp average (or from the replacement cost value, when there are no comps) before the threshold test, and the buyer check treats that value as the buyer's resale value (ARV), using the cost and profit percentages in Settings. Always verify numbers independently before making an offer.</p>
 
 </div>
 
@@ -565,7 +577,7 @@
   var SETTING_IDS = ["sBand","sMinComps","sStale","sDist","sOutlier","sBuyerCost","sBuyerProfit",
                      "sRateLight","sRateModerate","sRateHeavy","sRateGut"];
   var FIELD_IDS = ["propAddress","analystName","analystDate","subjSqft","askingPrice","desiredProfit",
-                   "threshold","repairs","rehabLevel","arvMethod","dealNotes"];
+                   "threshold","repairs","rehabLevel","arvMethod","dealNotes","subjDom","replCost"];
   var REHAB_LEVELS = [
     { id: "light", name: "Light", setting: "sRateLight" },
     { id: "moderate", name: "Moderate", setting: "sRateModerate" },
@@ -663,12 +675,16 @@
     r.sqftAvg = withSq.length ? sum(withSq.map(function(c){ return c.sqft; })) / withSq.length : null;
     r.ppsfPool = withSq.length ? sum(withSq.map(function(c){ return c.price; })) / sum(withSq.map(function(c){ return c.sqft; })) : null;
     r.arvPpsf = (inp.subjSqft > 0 && r.ppsfPool) ? r.ppsfPool * inp.subjSqft : null;
+    var withDom = used.filter(function(c){ return c.dom !== null && c.dom !== undefined; });
+    r.domCount = withDom.length;
+    r.domAvg = withDom.length ? sum(withDom.map(function(c){ return c.dom; })) / withDom.length : null;
 
     // ---- comp quality flags (used comps only) ----
     function list(a){ return a.map(function(i){ return "#" + i; }).join(", "); }
     if (r.compCount > 0 && r.compCount < cfg.minComps){
       r.flags.push({ level: "warn", text: "Only " + r.compCount + " comp" + (r.compCount === 1 ? "" : "s") +
-        " used. " + cfg.minComps + " or more makes the comp value more reliable." });
+        " used. " + cfg.minComps + " or more makes the comp value more reliable." +
+        (inp.replCost > 0 ? " Replacement cost value for comparison: " + money(inp.replCost) + "." : "") });
     }
     var stale = [], far = [], out = [], size = [];
     used.forEach(function(c){
@@ -704,30 +720,47 @@
       }
     }
 
-    // ---- ARV by selected method ----
+    // ---- value by selected method (the replacement cost value takes over when there are no comps) ----
     var method = inp.method;
-    r.methodLabel = method === "median" ? "comp median" : method === "ppsf" ? "$/sq ft x subject sq ft" : "comp average";
-    var arv = method === "median" ? r.median : method === "ppsf" ? r.arvPpsf : r.avg;
+    var usingRepl = (method === "repl") || (r.compCount === 0 && inp.replCost > 0);
+    r.usingRepl = usingRepl;
+    r.replAuto = usingRepl && method !== "repl";
+    r.methodLabel = usingRepl ? "replacement cost value"
+      : method === "median" ? "comp median" : method === "ppsf" ? "$/sq ft x subject sq ft" : "comp average";
+    var arv = usingRepl ? inp.replCost : method === "median" ? r.median : method === "ppsf" ? r.arvPpsf : r.avg;
     r.arv = arv > 0 ? arv : null;
 
     // ---- validation ----
     var errs = [];
     if (!(inp.thresholdPct > 0 && inp.thresholdPct <= 100)) errs.push("Green-light threshold must be between 1% and 100%.");
-    if ([inp.asking, inp.fee, inp.repairs, inp.subjSqft].some(function(v){ return v < 0; })) errs.push("Prices, fee, repairs and sq ft can't be negative.");
+    if ([inp.asking, inp.fee, inp.repairs, inp.subjSqft, inp.replCost].some(function(v){ return v < 0; })) errs.push("Prices, fee, repairs, replacement cost and sq ft can't be negative.");
     if (errs.length){
       r.state = "ERROR"; r.light = "CHECK INPUTS"; r.verdict = errs.join(" "); r.hint = errs[0];
       return r;
     }
     if (!r.arv){
-      if (method === "ppsf" && r.avg){
+      if (method === "repl"){
+        r.state = "NEEDREPL"; r.light = "ENTER REPLACEMENT COST";
+        r.verdict = "The replacement cost method needs a replacement cost value. Enter one in Deal Inputs, or load a comp report that has it, or switch the comp value method.";
+      } else if (method === "ppsf" && r.avg){
         r.state = "NEEDSQFT"; r.light = "ENTER SQ FT";
         r.verdict = "The $/sq ft method needs the subject's sq ft and sq ft on at least one used comp. Add them, or switch the comp value method.";
       } else {
         r.state = "NOCOMPS"; r.light = "ENTER COMPS";
-        r.verdict = "Add 3 to 5 sold comparable sale prices in the comp table above.";
+        r.verdict = "Add 3 to 5 sold comparable sale prices in the comp table above, or enter a replacement cost value to use when there are no comps.";
       }
       r.hint = r.verdict;
       return r;
+    }
+
+    if (usingRepl){
+      r.dealFlags.push({ level: "warn", text: "The value basis is the replacement cost value of " + money(arv) +
+        (r.replAuto ? ", because no sold comps are entered" : ", as selected") +
+        ". It is a cost estimate, not what buyers paid, so treat this light as a rough screen and add comps when you can." });
+    }
+    if (inp.subjDom !== null && r.domAvg !== null && inp.subjDom > r.domAvg * 1.5 && inp.subjDom - r.domAvg >= 15){
+      r.dealFlags.push({ level: "info", text: "The subject has been listed " + fmt0(inp.subjDom) + " days, against an average of " +
+        fmt0(r.domAvg) + " days on market for the comps. A long wait can mean more room to negotiate." });
     }
 
     var thr = inp.thresholdPct / 100;
@@ -742,8 +775,9 @@
       : r.methodLabel + " of " + money(arv);
     function M(label, value, cls){ return { label: label, value: value, cls: cls }; }
     var thrTxt = inp.thresholdPct + "%";
-    var vName = inp.method === "median" ? "Comp median" : inp.method === "ppsf" ? "$/sq ft value" : "Comp average";
+    var vName = usingRepl ? "Replacement cost value" : inp.method === "median" ? "Comp median" : inp.method === "ppsf" ? "$/sq ft value" : "Comp average";
     r.valueName = vName;
+    r.valueShort = usingRepl ? "Repl. cost value" : vName;
     function topTiles(){
       return [ M(vName, money(arv)), M("Repairs (subtracted)", money(repairs)),
                M("Adjusted value (" + vName.toLowerCase() + " less repairs)", money(adj)) ];
@@ -870,7 +904,7 @@
     ];
     if (r.buyer) bars.push({ label: "Buyer max", value: Math.max(r.buyer.ceiling, 0), color: "#6366f1" });
     if (r.repairs > 0) bars.push({ label: "Adjusted value", value: Math.max(r.adjValue, 0), color: "#4d9a6a" });
-    bars.push({ label: r.inp.method === "avg" ? "Comp average" : r.valueName, value: r.arv, color: "#15803d" });
+    bars.push({ label: r.valueShort, value: r.arv, color: "#15803d" });
     return bars;
   }
 
@@ -892,6 +926,7 @@
       '<td class="comp-calc comp-ppsf" data-label="$ / sq ft">—</td>' +
       '<td data-label="Days ago"><input type="number" class="comp-days" min="0" step="1" inputmode="numeric" placeholder="—"></td>' +
       '<td data-label="Miles"><input type="number" class="comp-dist" min="0" step="0.1" inputmode="decimal" placeholder="—"></td>' +
+      '<td data-label="DOM"><input type="number" class="comp-dom" min="0" step="1" inputmode="numeric" placeholder="—" title="Days on market before it sold"></td>' +
       '<td class="c-notes" data-label="Notes"><input type="text" class="comp-notes comp-text" placeholder="Notes"></td>';
     compBody.appendChild(tr);
     if (v.use === false) tr.querySelector(".comp-use").checked = false;
@@ -900,6 +935,7 @@
     tr.querySelector(".comp-sqft").value = v.sqft === undefined ? "" : v.sqft;
     tr.querySelector(".comp-days").value = v.days === undefined ? "" : v.days;
     tr.querySelector(".comp-dist").value = v.dist === undefined ? "" : v.dist;
+    tr.querySelector(".comp-dom").value = v.dom === undefined ? "" : v.dom;
     tr.querySelector(".comp-notes").value = v.notes || "";
   }
   function setCompRows(list){
@@ -924,6 +960,7 @@
         sqft: tr.querySelector(".comp-sqft").value,
         days: tr.querySelector(".comp-days").value,
         dist: tr.querySelector(".comp-dist").value,
+        dom: tr.querySelector(".comp-dom").value,
         notes: tr.querySelector(".comp-notes").value
       });
     });
@@ -941,10 +978,10 @@
     return {
       asking: num(st.askingPrice), fee: num(st.desiredProfit), thresholdPct: num(st.threshold),
       repairs: num(st.repairs), method: st.arvMethod || "avg",
-      subjSqft: num(st.subjSqft),
+      subjSqft: num(st.subjSqft), subjDom: numOrNull(st.subjDom), replCost: num(st.replCost),
       comps: (st.comps || []).map(function(c, i){
         return { idx: i + 1, use: c.use !== false, address: c.address || "", price: num(c.price), sqft: num(c.sqft),
-                 days: numOrNull(c.days), dist: numOrNull(c.dist), notes: c.notes || "" };
+                 days: numOrNull(c.days), dist: numOrNull(c.dist), dom: numOrNull(c.dom), notes: c.notes || "" };
       })
     };
   }
@@ -960,7 +997,7 @@
   function newDealState(){
     return {
       propAddress: "", analystName: $("analystName").value, analystDate: todayStr(), subjSqft: "",
-      askingPrice: "", desiredProfit: "15000", threshold: "80", repairs: "0", rehabLevel: "",
+      askingPrice: "", desiredProfit: "15000", threshold: "80", repairs: "0", rehabLevel: "", subjDom: "", replCost: "",
       arvMethod: "avg", dealNotes: "", comps: [], settings: readSettings()
     };
   }
@@ -1046,12 +1083,19 @@
     }
     var n = r.compCount;
     chip("Comp average", r.avg ? money(r.avg) : "—", n + " sold comp" + (n === 1 ? "" : "s") + " used" +
-      (r.excludedCount ? ", " + r.excludedCount + " left out" : ""), method === "avg");
-    chip("Comp median", r.median ? money(r.median) : "—", "middle sale price", method === "median");
+      (r.excludedCount ? ", " + r.excludedCount + " left out" : ""), method === "avg" && !r.usingRepl);
+    chip("Comp median", r.median ? money(r.median) : "—", "middle sale price", method === "median" && !r.usingRepl);
     chip("$/sq ft method", r.arvPpsf ? money(r.arvPpsf) : "—",
-      r.ppsfPool ? money(r.ppsfPool) + "/sq ft" + (r.arvPpsf ? " x subject sq ft" : ", add subject sq ft") : "needs sq ft on comps", method === "ppsf");
+      r.ppsfPool ? money(r.ppsfPool) + "/sq ft" + (r.arvPpsf ? " x subject sq ft" : ", add subject sq ft") : "needs sq ft on comps", method === "ppsf" && !r.usingRepl);
     chip("Range (low / high)", r.low !== null ? money(r.low) + " – " + money(r.high) : "—",
       r.spread !== null ? "spread " + money(r.spread) : "", false);
+    var subjDomTxt = r.inp.subjDom !== null ? "subject " + fmt0(r.inp.subjDom) + " days" : "";
+    chip("Avg days on market", r.domAvg !== null ? fmt0(r.domAvg) + " days" : "—",
+      r.domCount ? r.domCount + " comp" + (r.domCount === 1 ? "" : "s") + " with DOM" + (subjDomTxt ? "; " + subjDomTxt : "")
+                 : (subjDomTxt || "enter DOM on the comps"), false);
+    chip("Replacement cost value", r.inp.replCost > 0 ? money(r.inp.replCost) : "—",
+      r.usingRepl ? (r.replAuto ? "in use: no sold comps" : "in use: selected")
+                  : (r.inp.replCost > 0 ? "fallback when there are no comps" : "enter, or load from a comp report"), r.usingRepl);
   }
 
   function renderMetrics(r){
@@ -1300,7 +1344,7 @@
   function buildCsv(){
     var cols = ["Saved","Address","Analyst","Date","Subject sq ft","Asking","Fee","Threshold %","Repairs",
       "Adjusted value","Comp value method","Comp value","Cap","Asking + fee","Room under/over cap","Light",
-      "Max ask (keeps fee)","Max fee at ask","Comps used","Buyer ceiling","Buyer profit","Buyer status","Notes"];
+      "Max ask (keeps fee)","Max fee at ask","Comps used","Buyer ceiling","Buyer profit","Buyer status","Subject DOM","Avg comp DOM","Replacement cost value","Notes"];
     var rows = [cols.map(csvCell).join(",")];
     function rnd(v){ return (v === null || v === undefined || !isFinite(v)) ? "" : Math.round(v); }
     deals.forEach(function(d){
@@ -1310,7 +1354,8 @@
         inp.thresholdPct, rnd(inp.repairs), rnd(r.adjValue), r.methodLabel, rnd(r.arv), rnd(r.cap),
         r.ready ? rnd(r.loaded) : "", r.ready ? rnd(r.room) : "", r.light, r.ready && r.maxAsk >= 0 ? rnd(r.maxAsk) : "",
         r.ready && r.maxFeeAtAsk > 0 ? rnd(r.maxFeeAtAsk) : "", r.compCount, r.buyer ? rnd(r.buyer.ceiling) : "",
-        r.buyer ? rnd(r.buyer.profit) : "", r.buyer ? r.buyer.headline : "", st.dealNotes
+        r.buyer ? rnd(r.buyer.profit) : "", r.buyer ? r.buyer.headline : "",
+        inp.subjDom !== null ? rnd(inp.subjDom) : "", r.domAvg !== null ? rnd(r.domAvg) : "", inp.replCost > 0 ? rnd(inp.replCost) : "", st.dealNotes
       ].map(csvCell).join(","));
     });
     return rows.join("\r\n");
@@ -1466,10 +1511,13 @@
     doc.text("Analyst / Date:", pageW - margin - 215, y);
     setT(10.5, "normal");
     doc.text((st.analystName || "—") + "   |   " + (st.analystDate || todayStr()), pageW - margin - 130, y);
-    if (r.inp.subjSqft > 0){
+    var subjBits = [];
+    if (r.inp.subjSqft > 0) subjBits.push(fmt0(r.inp.subjSqft) + " sq ft");
+    if (r.inp.subjDom !== null) subjBits.push(fmt0(r.inp.subjDom) + " days on market");
+    if (subjBits.length){
       y += 15;
       setT(10, "bold"); doc.text("Subject:", margin, y);
-      setT(10, "normal"); doc.text(fmt0(r.inp.subjSqft) + " sq ft", margin + 52, y);
+      setT(10, "normal"); doc.text(subjBits.join("   |   "), margin + 52, y);
     }
     y += 20;
 
@@ -1521,8 +1569,8 @@
       ["Green-light threshold", r.inp.thresholdPct + "%"],
       ["Repairs estimate" + (rehab ? " (" + rehab.name.toLowerCase() + " rehab, $" + fmt0(rehab.rate) + "/sq ft)" : "") +
         ", subtracted from the comp value", money(r.inp.repairs)],
-      ["Comp value method", r.methodLabel.charAt(0).toUpperCase() + r.methodLabel.slice(1)]
-    ]);
+      ["Comp value method", r.methodLabel.charAt(0).toUpperCase() + r.methodLabel.slice(1) + (r.replAuto ? " (no sold comps)" : "")]
+    ].concat(r.inp.replCost > 0 ? [["Replacement cost value" + (r.usingRepl ? " (in use)" : " (fallback)"), money(r.inp.replCost)]] : []));
 
     // comps
     var compRows = r.inp.comps.filter(function(c){ return c.use && c.price > 0; }).map(function(c){
@@ -1530,19 +1578,20 @@
       var notes = (c.notes || "") + (fl ? ((c.notes ? "\n" : "") + "Flag: " + fl) : "");
       return [String(c.idx), c.address || "—", money(c.price), c.sqft ? fmt0(c.sqft) : "—",
               c.sqft ? money(c.price / c.sqft) : "—", c.days !== null ? fmt0(c.days) : "—",
-              c.dist !== null ? String(c.dist) : "—", notes];
+              c.dist !== null ? String(c.dist) : "—", c.dom !== null && c.dom !== undefined ? fmt0(c.dom) : "—", notes];
     });
-    if (!compRows.length) compRows = [["—", "No sold comps entered yet", "—", "—", "—", "—", "—", ""]];
+    if (!compRows.length) compRows = [["—", r.usingRepl ? "No sold comps. The replacement cost value is the basis." : "No sold comps entered yet", "—", "—", "—", "—", "—", "—", ""]];
     ensure(100);
     doc.autoTable({
       startY: y, margin: { left: margin, right: margin }, theme: "grid",
-      head: [["#", "Address / MLS / Source", "Sale price", "Sq ft", "$/sq ft", "Days", "Mi", "Notes / flags"]],
+      head: [["#", "Address / MLS / Source", "Sale price", "Sq ft", "$/sq ft", "Days", "Mi", "DOM", "Notes / flags"]],
       body: compRows,
       styles: { font: FONT, cellPadding: 4, fontSize: 9, textColor: INK },
       headStyles: { font: FONT, fontStyle: "bold", fillColor: [11, 37, 69], textColor: 255, fontSize: 9 },
       columnStyles: {
         0: { cellWidth: 20 }, 2: { halign: "right", cellWidth: 58 }, 3: { halign: "right", cellWidth: 38 },
-        4: { halign: "right", cellWidth: 42 }, 5: { halign: "right", cellWidth: 30 }, 6: { halign: "right", cellWidth: 28 }
+        4: { halign: "right", cellWidth: 42 }, 5: { halign: "right", cellWidth: 30 }, 6: { halign: "right", cellWidth: 28 },
+        7: { halign: "right", cellWidth: 30 }
       }
     });
     y = doc.lastAutoTable.finalY + 6;
@@ -1556,10 +1605,12 @@
     // ARV cross-check
     var m = r.inp.method;
     kvTable("Comp value estimates", [
-      ["Comp average (" + r.compCount + " used)" + (m === "avg" ? "  [selected]" : ""), r.avg ? money(r.avg) : "—"],
-      ["Comp median" + (m === "median" ? "  [selected]" : ""), r.median ? money(r.median) : "—"],
-      ["$/sq ft x subject sq ft" + (r.ppsfPool ? " (" + money(r.ppsfPool) + "/sq ft)" : "") + (m === "ppsf" ? "  [selected]" : ""), r.arvPpsf ? money(r.arvPpsf) : "—"],
+      ["Comp average (" + r.compCount + " used)" + (m === "avg" && !r.usingRepl ? "  [selected]" : ""), r.avg ? money(r.avg) : "—"],
+      ["Comp median" + (m === "median" && !r.usingRepl ? "  [selected]" : ""), r.median ? money(r.median) : "—"],
+      ["$/sq ft x subject sq ft" + (r.ppsfPool ? " (" + money(r.ppsfPool) + "/sq ft)" : "") + (m === "ppsf" && !r.usingRepl ? "  [selected]" : ""), r.arvPpsf ? money(r.arvPpsf) : "—"],
       ["Comp range (low / high)", r.low !== null ? money(r.low) + " – " + money(r.high) : "—"],
+      ["Average days on market" + (r.domCount ? " (" + r.domCount + " comp" + (r.domCount === 1 ? "" : "s") + ")" : ""), r.domAvg !== null ? fmt0(r.domAvg) + " days" : "—"],
+      ["Replacement cost value" + (r.usingRepl ? "  [in use]" : r.inp.replCost > 0 ? "  [fallback]" : ""), r.inp.replCost > 0 ? money(r.inp.replCost) : "—"],
       ["Adjusted value (selected comp value less repairs)", r.arv ? money(r.adjValue) : "—"]
     ]);
 
@@ -1622,7 +1673,7 @@
     // footer on every page
     var pageCount = doc.internal.getNumberOfPages();
     var disclaimer = "Not an appraisal. This is a screening tool: comp quality (distance, condition, recency, concessions) can move the comp average more than the math. " +
-      "Repairs are subtracted from the comp average before the threshold test, and the buyer check treats the comp average as the buyer's resale value, using stated cost and profit percentages. Verify numbers independently before making an offer.";
+      "Repairs are subtracted from the comp average before the threshold test, and the buyer check treats the comp average as the buyer's resale value, using stated cost and profit percentages. With no comps, the replacement cost value (a cost estimate, not a sale price) stands in for the comp average. Verify numbers independently before making an offer.";
     for (var p = 1; p <= pageCount; p++){
       doc.setPage(p);
       doc.setDrawColor(219, 226, 234);
@@ -1727,10 +1778,20 @@
     if (m2){
       var obj = decodeDeal(m2[1]);
       var r1 = obj ? normalizeCompReport(obj.subject, obj.comps, "embedded") : null;
-      if (r1 && r1.comps.length) return r1;
+      if (r1 && (r1.comps.length || r1.subject.replCost)) return r1;
+    }
+    var emb = null, m3 = /COMPDATA1:([A-Za-z0-9+\/=]+)/.exec(s);
+    if (m3){
+      var eo = decodeDeal(m3[1]);
+      if (eo && typeof eo === "object" && eo.subject && typeof eo.subject === "object") emb = normSubject(eo.subject);
     }
     var r2 = await readCompReportText(s);
-    if (r2) return r2;
+    if (r2 && !r2.error){
+      if (emb) r2.subject = mergeSubject(r2.subject, emb);      // exact subject details from the report's embedded data
+      return r2;
+    }
+    if (r2 && r2.error) return r2;
+    if (emb && emb.address) return { kind: "comps", subject: emb, comps: [], skipped: 0, source: "embedded", costMissing: "" };
     return { error: "This PDF isn't a saved deal report or a comp report I recognize, so there is nothing to load. Reports made by the Comp Report Builder and by this analyzer's Create PDF report both work." };
   }
 
@@ -1757,15 +1818,33 @@
     return bits.join(" · ");
   }
   // subject / comps arrive either from the embedded JSON (raw app objects) or from the text reader (strings)
-  function normalizeCompReport(subj, comps, source){
+  function normSubject(subj){
     subj = subj || {};
-    if (!Array.isArray(comps)) return null;
-    var S = {
+    var rc = cleanNum(subj.replCost), yb = str(subj.yearBuilt, 6);
+    return {
       address: str(subj.address, 300), sqft: cleanNum(subj.sqft), ask: cleanNum(subj.ask),
       beds: str(subj.beds, 10), baths: str(subj.baths, 10), roof: str(subj.roofType || subj.roof, 60),
       foundation: str(subj.foundation, 40), foundationSqft: cleanNum(subj.foundationSqft),
-      garage: subj.garage === true ? (str(subj.garageType, 30) || "Yes") : subj.garage === false ? "No garage" : str(subj.garage, 40)
+      garage: subj.garage === true ? (str(subj.garageType, 30) || "Yes") : subj.garage === false ? "No garage" : str(subj.garage, 40),
+      yearBuilt: /^\d{4}$/.test(yb) ? yb : "", dom: cleanNum(subj.dom),
+      replCost: rc > 0 ? rc : null, costNote: str(subj.costNote, 400)
     };
+  }
+  function mergeSubject(base, over){
+    var o = {};
+    Object.keys(base).forEach(function(k){ o[k] = base[k]; });
+    Object.keys(over).forEach(function(k){
+      var v = over[k];
+      if (v === null || v === undefined || v === "") return;
+      if (typeof v === "number" && !(v > 0)) return;
+      o[k] = v;
+    });
+    return o;
+  }
+  // subject / comps arrive either from the embedded JSON (raw app objects) or from the text reader (strings)
+  function normalizeCompReport(subj, comps, source){
+    if (!Array.isArray(comps)) return null;
+    var S = normSubject(subj);
     var out = [], skipped = 0;
     comps.forEach(function(c){
       c = c || {};
@@ -1773,13 +1852,13 @@
       if (!(price > 0)){ skipped++; return; }
       var date = str(c.soldDate, 30).slice(0, 10);
       var garage = c.garage === true ? (str(c.garageType, 30) || "Yes") : c.garage === false ? "No" : str(c.garage, 30);
-      var rec = { address: str(c.address, 300), price: price, sqft: cleanNum(c.sqft), days: daysSince(date),
-                  dist: cleanNum(c.miles !== undefined ? c.miles : c.dist),
-                  soldDate: /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : "", beds: str(c.beds, 10), baths: str(c.baths, 10), garage: garage };
-      out.push(rec);
+      var dom = cleanNum(c.dom !== undefined ? c.dom : c.daysOnMarket);
+      out.push({ address: str(c.address, 300), price: price, sqft: cleanNum(c.sqft), days: daysSince(date),
+                 dist: cleanNum(c.miles !== undefined ? c.miles : c.dist), dom: dom >= 0 ? dom : null,
+                 soldDate: /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : "", beds: str(c.beds, 10), baths: str(c.baths, 10), garage: garage });
     });
     out.forEach(function(c){ c.notes = compNote(c); });
-    return { kind: "comps", subject: S, comps: out, skipped: skipped, source: source };
+    return { kind: "comps", subject: S, comps: out, skipped: skipped, source: source, costMissing: "" };
   }
 
   // ---------- comp report: read the visible text ----------
@@ -1936,70 +2015,107 @@
     if (!streams.length) return null;
     var all = readingOrder(streams.map(textItems));
     function idxOf(t){ for (var i = 0; i < all.length; i++) if (all[i].t.trim() === t) return i; return -1; }
-    var iTitle = idxOf("Comparable Sales Report"), iSubj = idxOf("Subject Property"), iComps = idxOf("Sold Comparables");
-    if (iTitle < 0 && iComps < 0) return null;
+    var iSubj = idxOf("Subject Property"), iComps = idxOf("Sold Comparables"), iCmp = idxOf("Comparison"), iCost = idxOf("Cost-Approach Estimate");
+    if (iSubj < 0 || (iComps < 0 && iCmp < 0 && iCost < 0)) return null;
+    function nextAfter(from){
+      var best = all.length;
+      [iComps, iCmp, iCost].forEach(function(i){ if (i > from && i < best) best = i; });
+      return best;
+    }
     // --- subject block
     var subj = {};
-    if (iSubj >= 0){
-      var subjItems = all.slice(iSubj + 1, iComps > iSubj ? iComps : all.length);
-      var lines = toLines(subjItems), labelX = Math.min.apply(null, subjItems.map(function(i){ return i.x; }).concat([1e9]));
-      var lastKey = null;
-      lines.forEach(function(l){
-        var first = l.items[0], isLabel = first.x < labelX + 25 && l.items.length > 1;
-        if (!isLabel){ if (lastKey) subj[lastKey] += " " + l.items.map(function(i){ return i.t; }).join(" "); return; }
-        var lab = first.t.trim().toLowerCase(), val = l.items.slice(1).map(function(i){ return i.t; }).join(" ").trim();
-        var key = /^address/.test(lab) ? "address" : /^sq/.test(lab) ? "sqft" : /^bed/.test(lab) ? "bedbath" : /^roof/.test(lab) ? "roofType"
-          : /^basement|^crawl|^found/.test(lab) ? "foundationText" : /^garage/.test(lab) ? "garage" : /^ask/.test(lab) ? "ask" : null;
-        if (key){ subj[key] = val; lastKey = key; } else lastKey = null;
-      });
-      var bb = /([\d.]+|—|-)\s*\/\s*([\d.]+|—|-)/.exec(subj.bedbath || "");
-      if (bb){ subj.beds = /\d/.test(bb[1]) ? bb[1] : ""; subj.baths = /\d/.test(bb[2]) ? bb[2] : ""; }
-      var ft = subj.foundationText || "";
-      if (/\d/.test(ft) || /[A-Za-z]/.test(ft)){
-        subj.foundation = ft.replace(/\(.*$/, "").trim();
-        var fs = /\(([\d,]+)\s*sq/i.exec(ft); if (fs) subj.foundationSqft = fs[1];
+    var subjItems = all.slice(iSubj + 1, nextAfter(iSubj));
+    var lines = toLines(subjItems), labelX = Math.min.apply(null, subjItems.map(function(i){ return i.x; }).concat([1e9]));
+    var lastKey = null;
+    lines.forEach(function(l){
+      var first = l.items[0], isLabel = first.x < labelX + 25 && l.items.length > 1;
+      if (!isLabel){ if (lastKey) subj[lastKey] += " " + l.items.map(function(i){ return i.t; }).join(" "); return; }
+      var lab = first.t.trim().toLowerCase(), val = l.items.slice(1).map(function(i){ return i.t; }).join(" ").trim();
+      var key = /^address/.test(lab) ? "address" : /^sq/.test(lab) ? "sqft" : /^year/.test(lab) ? "yearBuilt" : /^bed/.test(lab) ? "bedbath"
+        : /^roof/.test(lab) ? "roofType" : /^basement|^crawl|^found/.test(lab) ? "foundationText" : /^garage/.test(lab) ? "garage"
+        : /^ask/.test(lab) ? "ask" : /^days on|^dom/.test(lab) ? "dom" : null;
+      if (key){ subj[key] = val; lastKey = key; } else lastKey = null;
+    });
+    var bb = /([\d.]+|—|-)\s*\/\s*([\d.]+|—|-)/.exec(subj.bedbath || "");
+    if (bb){ subj.beds = /\d/.test(bb[1]) ? bb[1] : ""; subj.baths = /\d/.test(bb[2]) ? bb[2] : ""; }
+    var ft = subj.foundationText || "";
+    if (/[A-Za-z]/.test(ft)){
+      subj.foundation = ft.replace(/\(.*$/, "").trim();
+      var fs = /\(([\d,]+)\s*sq/i.exec(ft); if (fs) subj.foundationSqft = fs[1];
+    }
+    if (!/[A-Za-z0-9]/.test(subj.roofType || "")) subj.roofType = "";
+    if (!/[A-Za-z]/.test(subj.garage || "")) subj.garage = "";
+    if (!/\d/.test(subj.ask || "")) subj.ask = "";
+    if (!/\d/.test(subj.sqft || "")) subj.sqft = "";
+    if (!/\d/.test(subj.dom || "")) subj.dom = "";
+    // --- comps table (absent when the report fell back to the cost approach with no comps)
+    var comps = [];
+    if (iComps >= 0){
+      var tbl = all.slice(iComps + 1, nextAfter(iComps)), tlines = toLines(tbl);
+      var hdr = null; for (var h = 0; h < tlines.length; h++){
+        var txts = tlines[h].items.map(function(i){ return i.t.trim(); });
+        if (txts.indexOf("Sold date") >= 0 && txts.indexOf("Sold price") >= 0){ hdr = tlines[h]; break; }
       }
-      if (!/[A-Za-z0-9]/.test(subj.roofType || "")) subj.roofType = "";
-      if (!/[A-Za-z]/.test(subj.garage || "")) subj.garage = "";
-      if (!/\d/.test(subj.ask || "")) subj.ask = ""; if (!/\d/.test(subj.sqft || "")) subj.sqft = "";
-    }
-    // --- comps table
-    if (iComps < 0) return { error: "This looks like a comp report but its comps table couldn't be found." };
-    var iEnd = -1; for (var e = iComps + 1; e < all.length; e++){ if (all[e].t.trim() === "Comparison"){ iEnd = e; break; } }
-    var tbl = all.slice(iComps + 1, iEnd < 0 ? all.length : iEnd), tlines = toLines(tbl);
-    var hdr = null; for (var h = 0; h < tlines.length; h++){
-      var txts = tlines[h].items.map(function(i){ return i.t.trim(); });
-      if (txts.indexOf("Sold date") >= 0 && txts.indexOf("Sold price") >= 0){ hdr = tlines[h]; break; }
-    }
-    if (!hdr) return { error: "This looks like a comp report but its comps table couldn't be read." };
-    var cols = hdr.items.map(function(i){ return { name: i.t.trim(), x: i.x }; });
-    function colFor(x){ var c = 0; for (var k = 0; k < cols.length; k++) if (cols[k].x <= x + 3) c = k; return c; }
-    var rows = [], cur = null;
-    tlines.forEach(function(l){
-      if (l === hdr) return;
-      var tx = l.items.map(function(i){ return i.t.trim(); });
-      if (tx.indexOf("Sold date") >= 0 && tx.indexOf("Sold price") >= 0) return;      // repeated header on a later page
-      l.items.forEach(function(it){
-        var ci = colFor(it.x);
-        if (ci === 0 && /^\d{1,2}$/.test(it.t.trim())){ cur = {}; rows.push(cur); return; }
-        if (!cur) return;
-        var nm = cols[ci].name; cur[nm] = (cur[nm] ? cur[nm] + " " : "") + it.t.trim();
+      if (!hdr) return { error: "This looks like a comp report but its comps table couldn't be read." };
+      var cols = hdr.items.map(function(i){ return { name: i.t.trim(), x: i.x }; });
+      var colFor = function(x){ var c = 0; for (var k = 0; k < cols.length; k++) if (cols[k].x <= x + 3) c = k; return c; };
+      var rows = [], cur = null;
+      tlines.forEach(function(l){
+        if (l === hdr) return;
+        var tx = l.items.map(function(i){ return i.t.trim(); });
+        if (tx.indexOf("Sold date") >= 0 && tx.indexOf("Sold price") >= 0) return;      // repeated header on a later page
+        l.items.forEach(function(it){
+          var ci = colFor(it.x);
+          if (ci === 0 && /^\d{1,2}$/.test(it.t.trim())){ cur = {}; rows.push(cur); return; }
+          if (!cur) return;
+          var nm = cols[ci].name; cur[nm] = (cur[nm] ? cur[nm] + " " : "") + it.t.trim();
+        });
       });
-    });
-    var comps = rows.map(function(r){
-      var bd = /([\d.]+|—|-)\s*\/\s*([\d.]+|—|-)/.exec(r["Bd/Ba"] || "");
-      return { address: r["Address"] || "", soldDate: r["Sold date"] || "", sqft: r["Sq ft"], garage: r["Garage"] || "",
-               beds: bd && /\d/.test(bd[1]) ? bd[1] : "", baths: bd && /\d/.test(bd[2]) ? bd[2] : "",
-               miles: (/([\d.]+)\s*mi/.exec(r["Dist."] || "") || [])[1], soldPrice: /\d/.test(r["Sold price"] || "") ? r["Sold price"] : null };
-    });
+      var colVal = function(r, names){
+        for (var n = 0; n < names.length; n++) for (var key in r) if (key.toLowerCase() === names[n]) return r[key];
+        return undefined;
+      };
+      comps = rows.map(function(r){
+        var bd = /([\d.]+|—|-)\s*\/\s*([\d.]+|—|-)/.exec(r["Bd/Ba"] || "");
+        return { address: r["Address"] || "", soldDate: r["Sold date"] || "", sqft: r["Sq ft"], garage: r["Garage"] || "",
+                 beds: bd && /\d/.test(bd[1]) ? bd[1] : "", baths: bd && /\d/.test(bd[2]) ? bd[2] : "",
+                 miles: (/([\d.]+)\s*mi/.exec(r["Dist."] || "") || [])[1],
+                 dom: colVal(r, ["dom", "days on market"]),
+                 soldPrice: /\d/.test(r["Sold price"] || "") ? r["Sold price"] : null };
+      });
+    }
+    // --- cost-approach block (the comp app prints it when it has too few comps)
+    var cost = null;
+    if (iCost >= 0){
+      cost = {};
+      toLines(all.slice(iCost + 1)).forEach(function(l){
+        var tx = l.items.map(function(i){ return i.t; }).join(" ").replace(/\s+/g, " ").trim(), m;
+        if ((m = /Replacement cost new:\s*(-?\$?-?[\d,]+)\s*\(\s*([\d,]+)\s*sq\s*ft\s*[x×]\s*\$?([\d,.]+)/i.exec(tx))){
+          cost.rcn = cleanNum(m[1]); cost.sqft = cleanNum(m[2]); cost.cps = cleanNum(m[3]);
+        } else if ((m = /Replacement cost new:\s*(-?\$?-?[\d,]+)/i.exec(tx))){ cost.rcn = cleanNum(m[1]); }
+        else if ((m = /Less depreciation:\s*(-?\$?-?[\d,]+)/i.exec(tx))){ cost.depr = cleanNum(m[1]); }
+        else if ((m = /Plus land\/extras:\s*(-?\$?-?[\d,]+)/i.exec(tx))){ cost.land = cleanNum(m[1]); }
+        else if ((m = /Estimated value:\s*(-?\$?-?[\d,]+)/i.exec(tx))){ cost.value = cleanNum(m[1]); }
+        else if ((m = /Not calculated: missing\s+(.+?)\.?$/i.exec(tx))){ cost.missing = m[1]; }
+      });
+      if (!(cost.value > 0) && cost.rcn > 0) cost.value = cost.rcn - (cost.depr || 0) + (cost.land || 0);
+    }
+    var costNote = "";
+    if (cost && cost.rcn > 0 && cost.value > 0){
+      costNote = "replacement cost new " + money(cost.rcn) +
+        (cost.sqft > 0 && cost.cps > 0 ? " (" + fmt0(cost.sqft) + " sq ft x $" + fmt0(cost.cps) + "/sq ft)" : "") +
+        ", less depreciation " + money(cost.depr || 0) + ", plus land " + money(cost.land || 0) + " = " + money(cost.value);
+    }
     var res = normalizeCompReport({ address: subj.address, sqft: subj.sqft, ask: subj.ask, beds: subj.beds, baths: subj.baths,
-      roofType: subj.roofType, foundation: subj.foundation, foundationSqft: subj.foundationSqft, garage: subj.garage }, comps, "text");
-    if (!res.comps.length) return { error: "This looks like a comp report, but I couldn't read any sold prices from its table. Fix or enter the comps by hand, or ask for the report to be re-created." };
+      roofType: subj.roofType, foundation: subj.foundation, foundationSqft: subj.foundationSqft, garage: subj.garage,
+      yearBuilt: subj.yearBuilt, dom: subj.dom, replCost: cost ? cost.value : null, costNote: costNote }, comps, "text");
+    res.costMissing = cost && cost.missing ? cost.missing : "";
     return res;
   }
 
   function subjectNote(S){
     var bits = [];
+    if (S.yearBuilt) bits.push("built " + S.yearBuilt);
     if (S.beds || S.baths) bits.push((S.beds || "?") + " bd / " + (S.baths || "?") + " ba");
     if (S.roof) bits.push("roof " + S.roof.toLowerCase());
     if (S.foundation) bits.push(S.foundation.toLowerCase() + (S.foundationSqft ? " " + fmt0(S.foundationSqft) + " sq ft" : ""));
@@ -2007,36 +2123,61 @@
     return bits.length ? "Comp report subject: " + bits.join(", ") : "";
   }
   function applyCompImport(res, fileName){
-    var st = readState(), priorAddr = (st.propAddress || "").trim().toLowerCase(), priorRepairs = st.repairs, hadComps = st.comps.some(function(c){ return num(c.price) > 0; });
+    var st = readState(), priorAddr = (st.propAddress || "").trim().toLowerCase(), priorRepairs = st.repairs;
+    var existing = st.comps.filter(function(c){ return num(c.price) > 0; }).length;
     var S = res.subject, changed = [];
+    var addrChanged = !!(S.address && priorAddr && S.address.trim().toLowerCase() !== priorAddr);
     if (S.address){ st.propAddress = S.address; changed.push("address"); }
     if (S.sqft > 0){ st.subjSqft = String(S.sqft); changed.push(fmt0(S.sqft) + " sq ft"); }
     if (S.ask > 0){ st.askingPrice = String(S.ask); changed.push("asking " + money(S.ask)); }
+    if (S.dom !== null && S.dom !== undefined && S.dom >= 0){ st.subjDom = String(S.dom); changed.push(fmt0(S.dom) + " days on market"); }
+    else if (addrChanged) st.subjDom = "";
+    if (S.replCost > 0){ st.replCost = String(Math.round(S.replCost)); changed.push("replacement cost value " + money(S.replCost)); }
+    else if (addrChanged) st.replCost = "";
     var used = res.comps.slice(0, MAX_COMP_ROWS);
-    st.comps = used.map(function(c){
-      return { use: true, address: c.address, price: String(c.price), sqft: c.sqft > 0 ? String(c.sqft) : "",
-               days: c.days === null ? "" : String(c.days), dist: c.dist === null ? "" : String(c.dist), notes: c.notes };
-    });
-    var note = subjectNote(S);
-    if (note){
-      var kept = (st.dealNotes || "").split("\n").filter(function(l){ return l.indexOf("Comp report subject:") !== 0; }).join("\n").trim();
-      st.dealNotes = kept ? kept + "\n" + note : note;
-    }
+    var keptComps = false, clearedComps = false;
+    if (used.length){
+      st.comps = used.map(function(c){
+        return { use: true, address: c.address, price: String(c.price), sqft: c.sqft > 0 ? String(c.sqft) : "",
+                 days: c.days === null ? "" : String(c.days), dist: c.dist === null ? "" : String(c.dist),
+                 dom: c.dom === null || c.dom === undefined ? "" : String(c.dom), notes: c.notes };
+      });
+    } else if (addrChanged){ st.comps = []; clearedComps = existing > 0; }
+    else keptComps = existing > 0;
+    var add = [], sn = subjectNote(S);
+    if (sn) add.push(sn);
+    if (S.costNote) add.push("Comp report cost approach: " + S.costNote);
+    var keep = (st.dealNotes || "").split("\n").filter(function(l){
+      return l.indexOf("Comp report subject:") !== 0 && l.indexOf("Comp report cost approach:") !== 0;
+    }).join("\n").trim();
+    st.dealNotes = [keep].concat(add).filter(Boolean).join("\n");
     applyState(st);
     if ($("rehabLevel").value) syncRehab();
     var repairsMoved = $("repairs").value !== priorRepairs;
-    if (S.address && priorAddr && S.address.trim().toLowerCase() !== priorAddr) currentDealId = null;   // a different property: don't overwrite the loaded saved deal on update
+    if (addrChanged) currentDealId = null;   // a different property: don't overwrite the loaded saved deal on update
     clearStatus();
     render();
     window.scrollTo({ top: 0, behavior: "smooth" });
-    var msg = "Loaded " + used.length + " comp" + (used.length === 1 ? "" : "s") + (changed.length ? " and the subject details (" + changed.join(", ") + ")" : "") + " from " + fileName + ". " +
-      (hadComps ? "The comps you had entered were replaced. " : "") +
-      "Your fee, threshold, repairs method and settings were left as they were." +
-      (repairsMoved ? " Repairs updated to " + money(num($("repairs").value)) + " because the rehab level is tied to sq ft." : "");
+
+    var msg = used.length
+      ? "Loaded " + used.length + " comp" + (used.length === 1 ? "" : "s") + (changed.length ? " and the subject details (" + changed.join(", ") + ")" : "")
+      : "This report has no sold comps." + (changed.length ? " Loaded the subject details (" + changed.join(", ") + ")" : "");
+    msg += " from " + fileName + ". ";
+    if (used.length && existing) msg += "The comps you had entered were replaced. ";
+    if (!used.length){
+      if (keptComps) msg += "Your " + existing + " existing comp" + (existing === 1 ? "" : "s") + " were kept and are still the value basis. Clear them to use the replacement cost value. ";
+      else if (clearedComps) msg += "The comps from the previous property were cleared. ";
+      if (S.replCost > 0 && !keptComps) msg += "With no comps, the analyzer is using the replacement cost value of " + money(S.replCost) + " as the value. Add comps to switch back to them. ";
+      else if (!(S.replCost > 0)) msg += "It has no replacement cost value either" + (res.costMissing ? " (the comp app couldn't calculate it: missing " + res.costMissing + ")" : "") + ", so enter comps or a replacement cost value by hand. ";
+    } else if (S.replCost > 0){
+      msg += "The replacement cost value of " + money(S.replCost) + " is saved as a fallback; the comps are used while there are any. ";
+    }
+    msg += "Your fee, threshold, repairs method and settings were left as they were.";
+    if (repairsMoved) msg += " Repairs updated to " + money(num($("repairs").value)) + " because the rehab level is tied to sq ft.";
     if (res.comps.length > used.length) msg += " Only the first " + used.length + " of " + res.comps.length + " comps fit.";
     if (res.skipped) msg += " " + res.skipped + " row" + (res.skipped === 1 ? " had" : "s had") + " no sold price and " + (res.skipped === 1 ? "was" : "were") + " skipped.";
-    if (res.source === "text") msg += " Read from the report's text, so spot-check the rows against the PDF.";
-    showUploadStatus("success", msg);
+    if (res.source === "text") msg += " Read from the report's text, so spot-check the numbers against the PDF.";
+    showUploadStatus(!used.length && !(S.replCost > 0) ? "info" : "success", msg);
   }
   function sanitizeState(o){
     if (!o || typeof o !== "object" || !Array.isArray(o.comps)) return null;
@@ -2051,7 +2192,7 @@
     o.comps.slice(0, MAX_COMP_ROWS).forEach(function(c){
       c = c || {};
       st.comps.push({ use: c.use !== false, address: S(c.address, 300), price: S(c.price, 20), sqft: S(c.sqft, 20),
-                      days: S(c.days, 20), dist: S(c.dist, 20), notes: S(c.notes, 300) });
+                      days: S(c.days, 20), dist: S(c.dist, 20), dom: S(c.dom, 20), notes: S(c.notes, 300) });
     });
     return st;
   }
@@ -2091,15 +2232,15 @@
   function loadExample(){
     var ex = {
       propAddress: "123 Maple Street, Anytown, TX", analystName: $("analystName").value, analystDate: todayStr(),
-      subjSqft: "1650", askingPrice: "180000", desiredProfit: "15000", threshold: "80", repairs: "18000",
+      subjSqft: "1650", subjDom: "74", replCost: "214000", askingPrice: "180000", desiredProfit: "15000", threshold: "80", repairs: "18000",
       arvMethod: "avg", settings: readSettings(),
       dealNotes: "Call seller with the max green ask. Confirm repair scope before locking the fee. Pull title.",
       comps: [
-        { use: true, address: "118 Oak Ave", price: "248000", sqft: "1680", days: "28", dist: "0.2", notes: "3/2, similar vintage" },
-        { use: true, address: "441 Pine St", price: "255000", sqft: "1725", days: "41", dist: "0.4", notes: "Updated kitchen" },
-        { use: true, address: "902 Cedar Ln", price: "242500", sqft: "1600", days: "19", dist: "0.3", notes: "Needs cosmetic" },
-        { use: true, address: "77 Elm Court", price: "261000", sqft: "1805", days: "52", dist: "0.6", notes: "Slightly larger lot" },
-        { use: true, address: "208 Birch Dr", price: "296000", sqft: "1900", days: "214", dist: "0.9", notes: "Pool, fully renovated" }
+        { use: true, address: "118 Oak Ave", price: "248000", sqft: "1680", days: "28", dist: "0.2", dom: "24", notes: "3/2, similar vintage" },
+        { use: true, address: "441 Pine St", price: "255000", sqft: "1725", days: "41", dist: "0.4", dom: "31", notes: "Updated kitchen" },
+        { use: true, address: "902 Cedar Ln", price: "242500", sqft: "1600", days: "19", dist: "0.3", dom: "15", notes: "Needs cosmetic" },
+        { use: true, address: "77 Elm Court", price: "261000", sqft: "1805", days: "52", dist: "0.6", dom: "48", notes: "Slightly larger lot" },
+        { use: true, address: "208 Birch Dr", price: "296000", sqft: "1900", days: "214", dist: "0.9", dom: "96", notes: "Pool, fully renovated" }
       ]
     };
     applyState(ex);
